@@ -1,0 +1,136 @@
+From 78d3f5bd76421b6642c109c79e278de204fb06fd Mon Sep 17 00:00:00 2001
+From: sion-dev404 <gemisionkim@gmail.com>
+Date: Sat, 21 Nov 2026 23:20:42 +0900
+Subject: [PATCH] =?UTF-8?q?hwpcore=20=EC=B6=9C=EB=B0=9C=EC=A0=90:=20rhwp?=
+ =?UTF-8?q?=20v0.9.0=20+=20=ED=95=9C=EA=B8=80=20=ED=8E=B8=EC=A7=91?=
+ =?UTF-8?q?=EA=B8=B0=20=EC=88=98=EC=A0=95=202=EA=B0=80=EC=A7=80?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+- 글 뒤로 그림이 붙은 문단이 다음 문단과 겹치던 문제
+- HTML 붙여 넣기: 형광펜→음영, 위·아래 첨자, 쪽 나눔, 표 칸 안쪽 여백
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/document_core/commands/html_import.rs     |  8 +++++
+ .../commands/html_import/inline_content.rs    | 29 +++++++++++++++++++
+ src/document_core/html_table_import.rs        | 10 +++++--
+ src/renderer/layout/shape_item.inc.rs         | 14 +++++++++
+ 4 files changed, 59 insertions(+), 2 deletions(-)
+
+diff --git a/src/document_core/commands/html_import.rs b/src/document_core/commands/html_import.rs
+index 1c61b2b5..ec7ec8a8 100644
+--- a/src/document_core/commands/html_import.rs
++++ b/src/document_core/commands/html_import.rs
+@@ -849,6 +849,14 @@ impl DocumentCore {
+                     let mut para = Paragraph::default();
+                     para.para_shape_id = para_shape_id;
+                     self.parse_inline_content(&mut para, p_inner, &para_style);
++                    // CSS 쪽 나눔(page-break-before / break-before)이 있으면 이 문단 앞에서 쪽을 나눈다
++                    let style_lc = para_style.to_lowercase().replace(' ', "");
++                    if style_lc.contains("page-break-before:always")
++                        || style_lc.contains("break-before:page")
++                    {
++                        para.column_type = crate::model::paragraph::ColumnBreakType::Page;
++                        para.raw_break_type = 0x04;
++                    }
+                     paragraphs.push(para);
+ 
+                     pos = p_end;
+diff --git a/src/document_core/commands/html_import/inline_content.rs b/src/document_core/commands/html_import/inline_content.rs
+index c2c2444a..4c977165 100644
+--- a/src/document_core/commands/html_import/inline_content.rs
++++ b/src/document_core/commands/html_import/inline_content.rs
+@@ -285,6 +285,35 @@ impl DocumentCore {
+             }
+         }
+ 
++        // background-color → 글자 음영(형광펜). 투명이면 넣지 않는다.
++        // (rgba(…,0)처럼 완전히 투명한 색은 음영으로 넣지 않음)
++        let bg = parse_css_value(&css_lower, "background-color")
++            .or_else(|| parse_css_value(&css_lower, "background"));
++        cs.shade_color = crate::model::color::NONE;
++        if let Some(bg) = bg {
++            let v = bg.trim().to_string();
++            let transparent = v == "transparent"
++                || v == "none"
++                || (v.starts_with("rgba")
++                    && v.trim_end_matches(')')
++                        .rsplit(',')
++                        .next()
++                        .and_then(|a| a.trim().parse::<f64>().ok())
++                        .is_some_and(|a| a == 0.0));
++            if !transparent {
++                if let Some(bgr) = css_color_to_hwp_bgr(&v) {
++                    if bgr != 0x00FF_FFFF {
++                        cs.shade_color = bgr;
++                    }
++                }
++            }
++        }
++
++        // vertical-align → 위 첨자·아래 첨자
++        let va = parse_css_value(&css_lower, "vertical-align").unwrap_or_default();
++        cs.superscript = va.trim().starts_with("super");
++        cs.subscript = va.trim().starts_with("sub");
++
+         // text-decoration
+         let has_underline = css_lower.contains("text-decoration:underline")
+             || css_lower.contains("text-decoration: underline")
+diff --git a/src/document_core/html_table_import.rs b/src/document_core/html_table_import.rs
+index 6baa3bec..05f5fbee 100644
+--- a/src/document_core/html_table_import.rs
++++ b/src/document_core/html_table_import.rs
+@@ -526,7 +526,7 @@ impl DocumentCore {
+             let mut raw_list_extra = vec![0u8; 13];
+             raw_list_extra[0..4].copy_from_slice(&cell_width.to_le_bytes());
+ 
+-            cells.push(Cell {
++            let mut cell = Cell {
+                 col: cp.col,
+                 row: cp.row,
+                 col_span: cp.col_span,
+@@ -541,7 +541,13 @@ impl DocumentCore {
+                 vertical_align: v_align,
+                 raw_list_extra,
+                 ..Default::default()
+-            });
++            };
++            // CSS padding이 있으면 "셀 안쪽 여백 따로 지정"을 켠다.
++            // 켜지 않으면 표 전체 기본 여백이 쓰여 붙여 넣은 칸 안쪽 여백이 사라진다.
++            if pc.padding_pt.iter().any(|v| *v > 0.01) {
++                cell.set_apply_inner_margin(true);
++            }
++            cells.push(cell);
+         }
+ 
+         // 한 셀의 선호 폭보다 자식 표/줄 나눔 토큰이 넓으면 부모 열이 그 점유를
+diff --git a/src/renderer/layout/shape_item.inc.rs b/src/renderer/layout/shape_item.inc.rs
+index a56ff5ba..507c4963 100644
+--- a/src/renderer/layout/shape_item.inc.rs
++++ b/src/renderer/layout/shape_item.inc.rs
+@@ -425,6 +425,20 @@ impl LayoutEngine {
+                             ) {
+                                 result_y = saved_y_offset;
+                             }
++                            // The legacy non-advancing path above is evidence for an
++                            // *empty* host only. When the host paragraph paints visible
++                            // text, its line has already advanced the flow cursor; a
++                            // behind-text backdrop must not rewind it, or the next
++                            // paragraph is painted on top of the host's own text line.
++                            if matches!(
++                                pic.common.text_wrap,
++                                crate::model::shape::TextWrap::BehindText
++                            ) && !pic.common.treat_as_char
++                                && para_has_non_whitespace_text(para)
++                                && saved_y_offset.is_finite()
++                            {
++                                result_y = result_y.max(saved_y_offset);
++                            }
+                             // A co-anchored fixed title needs the otherwise
+                             // empty host's content line. Keep ordinary BehindText
+                             // logo hosts on the legacy path described above.
+-- 
+2.55.0.windows.5
+

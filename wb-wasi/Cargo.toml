@@ -1,0 +1,11 @@
+[package]
+name = "wb-wasi"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+wasm-bindgen-cli-support = "=0.2.127"
+anyhow = "1"
+
+[profile.release]
+opt-level = 2

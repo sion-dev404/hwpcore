@@ -1,0 +1,8 @@
+{
+  "name": "hwpcore-tools",
+  "private": true,
+  "description": "hwpcore 정답 비교 도구 (한글 2024 PDF ↔ hwpcore 그림)",
+  "dependencies": {
+    "pdfjs-dist": "4.10.38"
+  }
+}
