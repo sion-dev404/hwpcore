@@ -88,6 +88,11 @@ window.__run = async () => {
         const oc = document.createElement('canvas');
         // 한글 PDF(인쇄)와 비교하므로 인쇄 프로필로 그린다 — 빈 누름틀 안내문 등 편집 화면 전용 표시는 빠진다
         doc.renderPageToCanvasFilteredWithProfile(i, oc, cfg.width / info.width, 'all', 'print');
+        // 처음 쓰는 글꼴은 그리는 순간 불러오기 시작한다 — 다 불러온 뒤 다시 그려야 결과가 매번 같다
+        // 그림(특히 WMF→SVG로 바꾼 것)도 처음엔 비동기로 풀리므로 잠깐 기다린 뒤 다시 그린다(편집기 화면도 풀리면 다시 그림)
+        await document.fonts.ready;
+        await new Promise((r) => setTimeout(r, 120));
+        doc.renderPageToCanvasFilteredWithProfile(i, oc, cfg.width / info.width, 'all', 'print');
         const W = oc.width, H = oc.height;
         const page = await pdf.getPage(i + 1);
         const v1 = page.getViewport({ scale: 1 });
@@ -110,23 +115,33 @@ window.__run = async () => {
           const s = compare(octx, rctx, W, H, dc.getContext('2d'));
           if (!best || s.score > best.s.score) best = { s: { ...s, mode }, rc, dc };
         }
-        // 한글이 PDF에서 본문을 줄여 찍은 경우(메모 칸·인쇄 맞춤): 잉크 영역 상자를 맞춰 본다
-        if (best.s.score < 90) {
-          const bb = (ctx) => { const m = inkMask(ctx, W, H); let x0 = W, y0 = H, x1 = -1, y1 = -1;
-            for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) if (m[y * W + x]) { if (x < x0) x0 = x; if (x > x1) x1 = x; if (y < y0) y0 = y; if (y > y1) y1 = y; }
-            return x1 < 0 ? null : { x0, y0, w: x1 - x0 + 1, h: y1 - y0 + 1 }; };
-          const ob = bb(octx), rb = bb(best.rc.getContext('2d', { willReadFrequently: true }));
-          if (ob && rb) {
-            for (const k of [ob.h / rb.h, ob.w / rb.w]) {
-              if (!(k > 1.03 && k < 2)) continue;
-              const rc = document.createElement('canvas'); rc.width = W; rc.height = H;
-              const rctx = rc.getContext('2d', { willReadFrequently: true });
-              rctx.fillStyle = '#fff'; rctx.fillRect(0, 0, W, H);
-              rctx.drawImage(best.rc, rb.x0, rb.y0, W - rb.x0, H - rb.y0, ob.x0, ob.y0, (W - rb.x0) * k, (H - rb.y0) * k);
-              const dc = document.createElement('canvas'); dc.width = W; dc.height = H;
-              const s = compare(octx, rctx, W, H, dc.getContext('2d'));
-              if (s.score > best.s.score) best = { s: { ...s, mode: 'bbox', k: Math.round(k * 1000) / 1000 }, rc, dc };
-            }
+        // 쪽 전체 정렬 맞춤: 한글이 PDF를 만들 때 종이에 맞춰 줄이거나 옮긴 경우(인쇄 맞춤·메모 칸).
+        // 정답 그림을 "쪽 전체에 같은 비율 k + 평행 이동"으로만 맞춘다 — 쪽 일부만 움직이지 않으므로
+        // 표가 밀리거나 줄이 어긋나는 실제 배치 차이는 점수에 그대로 남는다.
+        if (best.s.score < 97) {
+          const ours = inkMask(octx, W, H);
+          const prof = (m) => { const r = new Float64Array(H), c = new Float64Array(W);
+            for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) if (m[y * W + x]) { r[y]++; c[x]++; } return [r, c]; };
+          const [orow, ocol] = prof(ours);
+          const shift = (a, b, R) => { let bd = 0, bv = -1; // a와 b(b를 d만큼 민 것)의 겹침이 가장 큰 d
+            for (let d = -R; d <= R; d++) { let v = 0; for (let i = Math.max(0, d); i < Math.min(a.length, a.length + d); i++) v += Math.min(a[i], b[i - d]); if (v > bv) { bv = v; bd = d; } }
+            return bd; };
+          const ks = [];
+          for (let k = 0.94; k <= 1.06 + 1e-9; k += 0.005) ks.push(k);
+          if (best.s.score < 85) for (let k = 0.74; k < 0.94; k += 0.01) ks.push(k), ks.push(1 / k);
+          const src = best.rc;
+          for (const k of ks) {
+            const t = document.createElement('canvas'); t.width = W; t.height = H;
+            const tctx = t.getContext('2d', { willReadFrequently: true });
+            tctx.fillStyle = '#fff'; tctx.fillRect(0, 0, W, H); tctx.drawImage(src, 0, 0, W * k, H * k);
+            const [rrow, rcol] = prof(inkMask(tctx, W, H));
+            const dy = shift(orow, rrow, 90), dx = shift(ocol, rcol, 90);
+            const rc = document.createElement('canvas'); rc.width = W; rc.height = H;
+            const rctx = rc.getContext('2d', { willReadFrequently: true });
+            rctx.fillStyle = '#fff'; rctx.fillRect(0, 0, W, H); rctx.drawImage(src, dx, dy, W * k, H * k);
+            const dc = document.createElement('canvas'); dc.width = W; dc.height = H;
+            const s = compare(octx, rctx, W, H, dc.getContext('2d'));
+            if (s.score > best.s.score) best = { s: { ...s, mode: 'align', k: Math.round(k * 1000) / 1000, dx, dy }, rc, dc };
           }
         }
         const { s, rc, dc } = best;

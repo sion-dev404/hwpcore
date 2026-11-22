@@ -1,0 +1,299 @@
+From c821c24838fe52c8707a6fa776601529b585e57e Mon Sep 17 00:00:00 2001
+From: sion-dev404 <gemisionkim@gmail.com>
+Date: Sun, 22 Nov 2026 12:21:32 +0900
+Subject: [PATCH 2/2] =?UTF-8?q?cellzone=20=EC=8B=9C=EC=9E=91=20=EC=85=80?=
+ =?UTF-8?q?=EC=9D=98=20=EB=8B=A4=EB=A5=B8=20=EB=8C=80=EA=B0=81=EC=84=A0?=
+ =?UTF-8?q?=EC=9D=84=20=EC=88=A8=EA=B8=B0=EC=A7=80=20=EC=95=8A=EC=9D=8C?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+cellzone 대각선이 있을 때 시작 셀 대각선을 무조건 숨기던 것을, 시작 셀 대각선이
+영역 BF의 복사본(같은 BF 또는 같은 대각선 모양·선·굵기·색·중심선)일 때만 숨기도록 좁힌다.
+한컴은 시작 셀이 영역과 다른 자기 대각선을 가지면 둘 다 그린다.
+
+근거: 대각선샘플.hwpx 1쪽 (cellzone BF11 검정 THICK_SLIM + 시작 셀 BF12 빨강 SLIM_THICK_SLIM)
+- 한글 2024 PDF 비교: 84.8% → 100% (68개 문서 평균 97.0 → 97.2, 하락 쪽 0)
+- rhwp --lib 시험: 수정 전후 실패 목록 동일(41, 모두 sparse 미수령 샘플), 새 실패 0
+- 새 시험: integration cellzone_origin_cell_own_different_diagonal_is_drawn(수정 전 FAIL → 후 PASS),
+  단위 border_style_diagonal_eq / coverage_records_zone_id_only_at_origin
+- clippy 네이티브(test 프로필)·wasm32 -D warnings 통과
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/renderer/layout/integration_tests.rs |  74 +++++++++++++++
+ src/renderer/layout/table_layout.rs      | 113 ++++++++++++++++++++---
+ 2 files changed, 175 insertions(+), 12 deletions(-)
+
+diff --git a/src/renderer/layout/integration_tests.rs b/src/renderer/layout/integration_tests.rs
+index 3c3d9afb..0655653d 100644
+--- a/src/renderer/layout/integration_tests.rs
++++ b/src/renderer/layout/integration_tests.rs
+@@ -1130,4 +1130,78 @@ mod tests {
+     // 는 Table/Image 는 전체 `cell_context`(다단계 경로)를, Rectangle/Line/Ellipse/
+     // Path/Equation 은 단일 레벨(`cell_index`/`cell_para_index`/
+     // `outer_table_control_index`, Task #1138/#1151 패턴)을 반영한다.
++
++    /// 관계형. 2026-11-22 12:15 +0900 작성 (직전 파일 변경 981ce66b, 2026-11-18 23:32:32 +0900).
++    /// 측정: 2026-11-22, hwpcore 비교 장치(한글 2024 "PDF로 저장" ↔ 엔진 Canvas print 프로필,
++    /// 1000px 폭, 밝기<180 잉크 2px 확장 겹침). 대각선샘플.hwpx 1쪽: 수정 전 84.8% → 수정 후 100%.
++    /// 전체 1쪽, 한글 PDF 1쪽.
++    ///
++    /// 표 3행의 3·4열에는 cellzone(BF 11: CENTER 대각선 검정 THICK_SLIM)이 걸쳐 있고,
++    /// 그 시작 셀(2,2)은 영역과 **다른** 자기 대각선(BF 12: CENTER 빨강 SLIM_THICK_SLIM)을 가진다.
++    /// 한컴은 영역 대각선과 시작 셀 대각선을 둘 다 그린다. 시작 셀 대각선은 영역 BF의
++    /// 복사본일 때만 숨겨야 한다.
++    #[test]
++    fn cellzone_origin_cell_own_different_diagonal_is_drawn() {
++        let path = "samples/대각선샘플.hwpx";
++        assert!(Path::new(path).exists(), "회귀 입력 없음: {path}");
++        let core = load_document(path).expect("대각선샘플.hwpx 열기 실패");
++        let svg = core.render_page_svg_native(0).expect("1쪽 SVG");
++
++        // (x1, y1, x2, y2) — stroke 색으로 나눈다
++        let lines = |color: &str| -> Vec<(f64, f64, f64, f64)> {
++            svg.split("<line")
++                .skip(1)
++                .filter(|c| {
++                    c[..c.find('>').unwrap_or(c.len())]
++                        .to_ascii_lowercase()
++                        .contains(&format!("stroke=\"{color}\""))
++                })
++                .filter_map(|c| {
++                    let attr = |k: &str| -> Option<f64> {
++                        c.split(&format!(" {k}=\""))
++                            .nth(1)?
++                            .split('"')
++                            .next()?
++                            .parse()
++                            .ok()
++                    };
++                    Some((attr("x1")?, attr("y1")?, attr("x2")?, attr("y2")?))
++                })
++                .collect()
++        };
++        let red = lines("#ff0000");
++        assert!(
++            !red.is_empty(),
++            "시작 셀(2,2)의 빨간 대각선이 그려지지 않음"
++        );
++        // 두 방향(/ 와 \)이 모두 있다
++        assert!(
++            red.iter().any(|l| (l.1 - l.3) * (l.0 - l.2) < 0.0),
++            "빨간 / 대각선 없음"
++        );
++        assert!(
++            red.iter().any(|l| (l.1 - l.3) * (l.0 - l.2) > 0.0),
++            "빨간 역슬래시 대각선 없음"
++        );
++
++        // 영역 대각선(검정, 굵은 선)은 두 셀에 걸쳐 그대로 있고, 빨간 대각선은 시작 셀 안에 있다
++        let zone: Vec<_> = lines("#000000")
++            .into_iter()
++            .filter(|l| (l.0 - l.2).abs() > 1.0 && (l.1 - l.3).abs() > 1.0)
++            .filter(|l| {
++                // 영역 대각선은 시작 셀과 같은 왼쪽 끝에서 시작한다(다른 셀의 대각선 제외)
++                let red_left = red.iter().map(|r| r.0.min(r.2)).fold(f64::MAX, f64::min);
++                (l.0.min(l.2) - red_left).abs() < 20.0
++            })
++            .collect();
++        assert!(!zone.is_empty(), "cellzone 대각선이 사라짐");
++        let zone_left = zone.iter().map(|l| l.0.min(l.2)).fold(f64::MAX, f64::min);
++        let zone_right = zone.iter().map(|l| l.0.max(l.2)).fold(f64::MIN, f64::max);
++        let zone_mid = (zone_left + zone_right) / 2.0;
++        for l in &red {
++            let (lo, hi) = (l.0.min(l.2), l.0.max(l.2));
++            assert!(lo >= zone_left - 20.0 && hi <= zone_mid + 20.0,
++                "빨간 대각선이 시작 셀(왼쪽 절반) 밖으로 나감: {l:?}, 영역 {zone_left}..{zone_right}");
++        }
++    }
+ }
+diff --git a/src/renderer/layout/table_layout.rs b/src/renderer/layout/table_layout.rs
+index e53a0101..37b98447 100644
+--- a/src/renderer/layout/table_layout.rs
++++ b/src/renderer/layout/table_layout.rs
+@@ -1754,38 +1754,54 @@ fn border_style_has_center_line_only(bs: &ResolvedBorderStyle) -> bool {
+ }
+ 
+ /// cellzone 대각선은 영역 전체에 한 번 그리고, 원본 중복 BF가 붙는 시작 셀만 숨긴다.
++/// 덮은 영역의 BorderFill id를 기록해, 시작 셀의 대각선이 그 영역 대각선의 복사본인지
++/// 그리는 쪽에서 판정할 수 있게 한다.
+ fn mark_cellzone_diagonal_origin_coverage(
+-    covered: &mut [Vec<bool>],
++    covered: &mut [Vec<Option<u16>>],
+     start_row: usize,
+     start_col: usize,
++    zone_border_fill_id: u16,
+ ) {
+     if let Some(row) = covered.get_mut(start_row) {
+         if let Some(cell) = row.get_mut(start_col) {
+-            *cell = true;
++            *cell = Some(zone_border_fill_id);
+         }
+     }
+ }
+ 
+-fn cell_span_has_cellzone_diagonal(
+-    covered: &[Vec<bool>],
++/// 대각선 모양 비트(attr bit 2~12: Slash·BackSlash 모양, 꺾은선, isCounter)
++const DIAGONAL_SHAPE_ATTR_MASK: u16 = 0x1FFC;
++
++/// 두 BorderFill의 대각선(모양·꺾은선·선 종류·굵기·색·중심선)이 같은가.
++/// cellzone 시작 셀에 영역 BF가 복사돼 붙은 경우를 다른 자기 대각선과 구분한다.
++fn border_style_diagonal_eq(a: &ResolvedBorderStyle, b: &ResolvedBorderStyle) -> bool {
++    (a.diagonal_attr & DIAGONAL_SHAPE_ATTR_MASK) == (b.diagonal_attr & DIAGONAL_SHAPE_ATTR_MASK)
++        && a.diagonal == b.diagonal
++        && a.center_line == b.center_line
++}
++
++/// 셀 범위 안에서 cellzone 대각선이 시작된 칸의 영역 BorderFill id들
++fn cell_span_cellzone_diagonal_zones(
++    covered: &[Vec<Option<u16>>],
+     row: usize,
+     col: usize,
+     row_span: usize,
+     col_span: usize,
+     row_count: usize,
+     col_count: usize,
+-) -> bool {
++) -> Vec<u16> {
+     let end_row = (row + row_span).min(row_count);
+     let end_col = (col + col_span).min(col_count);
+-    (row..end_row).any(|rr| {
+-        (col..end_col).any(|cc| {
++    (row..end_row)
++        .flat_map(|rr| (col..end_col).map(move |cc| (rr, cc)))
++        .filter_map(|(rr, cc)| {
+             covered
+                 .get(rr)
+                 .and_then(|cells| cells.get(cc))
+                 .copied()
+-                .unwrap_or(false)
++                .flatten()
+         })
+-    })
++        .collect()
+ }
+ 
+ fn border_style_has_center_line(bs: &ResolvedBorderStyle) -> bool {
+@@ -4845,7 +4861,8 @@ impl LayoutEngine {
+ 
+         // ── 4-2. cellzone 배경 렌더링 (zone 전체 영역에 한 번) ──
+         let mut cellzone_diagonal_nodes = Vec::new();
+-        let mut cellzone_diagonal_origin_covered = vec![vec![false; col_count]; row_count];
++        let mut cellzone_diagonal_origin_covered: Vec<Vec<Option<u16>>> =
++            vec![vec![None; col_count]; row_count];
+         for zone in &table.zones {
+             if zone.border_fill_id == 0 {
+                 continue;
+@@ -4940,6 +4957,7 @@ impl LayoutEngine {
+                             &mut cellzone_diagonal_origin_covered,
+                             sr,
+                             sc,
++                            zone.border_fill_id,
+                         );
+                         cellzone_diagonal_nodes.extend(render_cell_diagonal(
+                             tree, zone_bs, zone_x, zone_y, zone_w, zone_h,
+@@ -11270,7 +11288,7 @@ impl LayoutEngine {
+         header_or_master_cell: bool,
+         inline_table_flow_y_shift: f64,
+         nested_non_tac_cell_margin_compat: bool,
+-        cellzone_diagonal_origin_covered: &[Vec<bool>],
++        cellzone_diagonal_origin_covered: &[Vec<Option<u16>>],
+     ) {
+         let mut independent_border_nodes: Vec<RenderNode> = Vec::new();
+         for (cell_idx, cell) in table.cells.iter().enumerate() {
+@@ -12281,7 +12299,9 @@ impl LayoutEngine {
+             table_node.children.push(cell_node);
+ 
+             // (c) 셀 대각선 렌더링 (셀 콘텐츠 위에 그림)
+-            let suppress_cell_diagonal = cell_span_has_cellzone_diagonal(
++            // 시작 셀의 대각선이 영역 대각선의 복사본(같은 BF 또는 같은 대각선)일 때만 숨긴다.
++            // 시작 셀이 영역과 다른 자기 대각선을 가지면 한컴은 영역 대각선과 함께 둘 다 그린다.
++            let covering_zones = cell_span_cellzone_diagonal_zones(
+                 cellzone_diagonal_origin_covered,
+                 r,
+                 c,
+@@ -12290,6 +12310,15 @@ impl LayoutEngine {
+                 row_count,
+                 col_count,
+             );
++            let suppress_cell_diagonal = border_style.is_some_and(|bs| {
++                covering_zones.iter().any(|&zone_id| {
++                    zone_id == cell.border_fill_id
++                        || styles
++                            .border_styles
++                            .get((zone_id as usize).saturating_sub(1))
++                            .is_some_and(|zone_bs| border_style_diagonal_eq(bs, zone_bs))
++                })
++            });
+             if let Some(bs) = border_style {
+                 if !suppress_cell_diagonal || border_style_has_center_line_only(bs) {
+                     table_node.children.extend(render_cell_diagonal(
+@@ -33132,3 +33161,63 @@ impl CellSquareStackTextFloor {
+         top
+     }
+ }
++
++/// 관계형. 2026-11-22 12:15 +0900 작성 (직전 파일 변경 981ce66b, 2026-11-18 23:32:32 +0900).
++/// cellzone 시작 셀 대각선 숨김 판정: 영역 BF의 복사본(같은 대각선)이면 숨기고, 다르면 그린다.
++/// 실물 시각 근거는 integration_tests::cellzone_origin_cell_own_different_diagonal_is_drawn.
++#[cfg(test)]
++mod cellzone_diagonal_origin_tests {
++    use super::{
++        border_style_diagonal_eq, cell_span_cellzone_diagonal_zones,
++        mark_cellzone_diagonal_origin_coverage,
++    };
++    use crate::model::style::DiagonalLine;
++    use crate::renderer::style_resolver::ResolvedBorderStyle;
++
++    fn style(attr: u16, kind: u8, width: u8, color: u32) -> ResolvedBorderStyle {
++        ResolvedBorderStyle {
++            diagonal_attr: attr,
++            diagonal: DiagonalLine {
++                diagonal_type: kind,
++                width,
++                color,
++            },
++            ..Default::default()
++        }
++    }
++
++    #[test]
++    fn duplicate_zone_diagonal_is_equal_and_different_one_is_not() {
++        // CENTER  + CENTER / (bit 2~7), 검정 THICK_SLIM
++        let zone = style((0b010 << 2) | (0b010 << 5), 9, 12, 0x000000);
++        let duplicate = style((0b010 << 2) | (0b010 << 5), 9, 12, 0x000000);
++        let other_color = style((0b010 << 2) | (0b010 << 5), 9, 12, 0x0000FF);
++        let other_line = style((0b010 << 2) | (0b010 << 5), 10, 12, 0x000000);
++        let slash_only = style(0b010 << 2, 9, 12, 0x000000);
++        assert!(border_style_diagonal_eq(&zone, &duplicate));
++        assert!(!border_style_diagonal_eq(&zone, &other_color));
++        assert!(!border_style_diagonal_eq(&zone, &other_line));
++        assert!(!border_style_diagonal_eq(&zone, &slash_only));
++        // 대각선과 무관한 하위 비트(0~1)는 판정에 쓰지 않는다
++        assert!(border_style_diagonal_eq(
++            &zone,
++            &style(duplicate.diagonal_attr | 0b11, 9, 12, 0)
++        ));
++    }
++
++    #[test]
++    fn coverage_records_zone_id_only_at_origin() {
++        let mut covered = vec![vec![None; 4]; 3];
++        mark_cellzone_diagonal_origin_coverage(&mut covered, 2, 2, 11);
++        assert_eq!(
++            cell_span_cellzone_diagonal_zones(&covered, 2, 2, 1, 1, 3, 4),
++            vec![11]
++        );
++        assert!(cell_span_cellzone_diagonal_zones(&covered, 2, 3, 1, 1, 3, 4).is_empty());
++        // 병합 셀이 시작 칸을 포함하면 그 영역 id를 돌려준다
++        assert_eq!(
++            cell_span_cellzone_diagonal_zones(&covered, 1, 1, 2, 2, 3, 4),
++            vec![11]
++        );
++    }
++}
+-- 
+2.55.0.windows.5
+
