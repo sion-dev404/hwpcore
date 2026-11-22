@@ -13,3 +13,6 @@ work/
 tree.json
 samples-list.*
 rhwp-src-*/
+*.log
+fail-*.txt
+/cargo-msvc.cmd
